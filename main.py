@@ -1,14 +1,24 @@
+# coding: utf-8
+
+
 import os.path
+import numpy as np
 import tensorflow as tf
+import time
 import helper
+import cv2
+import sys
+from pprint import pprint
 import warnings
 from distutils.version import LooseVersion
 import project_tests as tests
+import matplotlib.image as img
 
 
 # Check TensorFlow Version
 assert LooseVersion(tf.__version__) >= LooseVersion('1.0'), 'Please use TensorFlow version 1.0 or newer.  You are using {}'.format(tf.__version__)
 print('TensorFlow Version: {}'.format(tf.__version__))
+
 
 # Check for a GPU
 if not tf.test.gpu_device_name():
@@ -24,16 +34,17 @@ def load_vgg(sess, vgg_path):
     :param vgg_path: Path to vgg folder, containing "variables/" and "saved_model.pb"
     :return: Tuple of Tensors from VGG model (image_input, keep_prob, layer3_out, layer4_out, layer7_out)
     """
-    # TODO: Implement function
-    #   Use tf.saved_model.loader.load to load the model and weights
-    vgg_tag = 'vgg16'
-    vgg_input_tensor_name = 'image_input:0'
-    vgg_keep_prob_tensor_name = 'keep_prob:0'
-    vgg_layer3_out_tensor_name = 'layer3_out:0'
-    vgg_layer4_out_tensor_name = 'layer4_out:0'
-    vgg_layer7_out_tensor_name = 'layer7_out:0'
+    vgg_tag = 'vgg16' 
     
-    return None, None, None, None, None
+    tf.saved_model.loader.load(sess, [vgg_tag], vgg_path)
+        
+    vgg_input_tensor = sess.graph.get_tensor_by_name('image_input:0')
+    vgg_keep_prob_tensor = sess.graph.get_tensor_by_name('keep_prob:0')
+    vgg_layer3_out_tensor = sess.graph.get_tensor_by_name('layer3_out:0')
+    vgg_layer4_out_tensor = sess.graph.get_tensor_by_name('layer4_out:0')
+    vgg_layer7_out_tensor = sess.graph.get_tensor_by_name('layer7_out:0')
+    
+    return vgg_input_tensor, vgg_keep_prob_tensor, vgg_layer3_out_tensor,             vgg_layer4_out_tensor, vgg_layer7_out_tensor
 tests.test_load_vgg(load_vgg, tf)
 
 
@@ -46,10 +57,82 @@ def layers(vgg_layer3_out, vgg_layer4_out, vgg_layer7_out, num_classes):
     :param num_classes: Number of classes to classify
     :return: The Tensor for the last layer of output
     """
-    # TODO: Implement function
-    return None
-tests.test_layers(layers)
+    with tf.variable_scope('decoder_layer_0'):
+        # 1x1 conv - resample for our class number in depth
+        resampled_vgg_7 = tf.layers.conv2d(inputs=vgg_layer7_out, 
+                                            filters=num_classes,
+                                            kernel_size=(1, 1),
+                                            padding='same',
+                                            name='resampled_vgg_7',
+                                            kernel_initializer = tf.truncated_normal_initializer(stddev=0.01))
+        
+        
+    with tf.variable_scope('decoder_layer_1'):
+        # trans-conv - upsample with fractionally strided conv
+        upsampled_vgg_7_to_4 = tf.layers.conv2d_transpose(inputs=resampled_vgg_7,
+                                                          filters=num_classes,
+                                                          kernel_size=(4, 4),
+                                                          strides=(2,2),
+                                                          padding='same',
+                                                          name='upsampled_vgg_7',
+                                                          kernel_initializer = tf.truncated_normal_initializer(stddev=0.01))
+        
+        # 1x1 conv - resample for our class number in depth
+        resampled_vgg_4 = tf.layers.conv2d(inputs=vgg_layer4_out, 
+                                            filters=num_classes,
+                                            kernel_size=(1, 1),
+                                            padding='same',
+                                            name='resampled_vgg_4',
+                                            kernel_initializer = tf.truncated_normal_initializer(stddev=0.01))
+        
+        # skip connection - combine with mid-granularity encoding layer
+        decoder_layer_1 = tf.add(upsampled_vgg_7_to_4, resampled_vgg_4, name='skip_connect_layer_0')
+        
 
+    with tf.variable_scope('decoder_layer_2'):
+        # trans-conv - upsample with fractionally strided conv
+        upsampled_vgg_4_to_3 = tf.layers.conv2d_transpose(inputs=decoder_layer_1,
+                                                          filters=num_classes,
+                                                          kernel_size=(4, 4),
+                                                          strides=(2,2),
+                                                          padding='same',
+                                                          name='upsampled_vgg_4',
+                                                          kernel_initializer = tf.truncated_normal_initializer(stddev=0.01))
+
+        
+        # 1x1 conv - resample for our class number in depth
+        resampled_vgg_3 = tf.layers.conv2d(inputs=vgg_layer3_out, 
+                                            filters=num_classes,
+                                            kernel_size=(1, 1),
+                                            padding='same',
+                                            name='resampled_vgg_3',
+                                            kernel_initializer = tf.truncated_normal_initializer(stddev=0.01))
+
+        
+        # skip connection - combine with mid-granularity encoding layer
+        decoder_layer_2 = tf.add(upsampled_vgg_4_to_3, resampled_vgg_3, name='skip_connect_layer_1')
+        
+
+    DOUBLINGS_REMAINING = 4
+    with tf.variable_scope('decoder_layer_3'):
+        # FINAL UPSAMPLING TO ORIGINAL DIMENSIONS. WHAT IS THE IMPACT OF DOING A 
+        #   MORE AGGRESSIVE UPSAMPLING VS. A SEQUENCE OF SMALLER ONES?
+        # *** TODO: CREATE FCN LAYER GENERATOR (AT LEAST FOR NON-SKIP CONNECTION 
+        #       LAYERS BASED ON TESTED TENSOR SHAPES FOUND IN RUN() BELOW!***)
+        # Combinatorially uses different VGG, or whatever, layers to create skip
+        #   layers and evaluates the model?
+        upsampled_vgg_3_to_output = tf.layers.conv2d_transpose(inputs=decoder_layer_2,
+                                                          filters=num_classes,
+                                                          kernel_size=(4*DOUBLINGS_REMAINING, 
+                                                                       4*DOUBLINGS_REMAINING),
+                                                          strides=(2*DOUBLINGS_REMAINING,
+                                                                   2*DOUBLINGS_REMAINING),
+                                                          padding='same',
+                                                          name='upsampled_final_output',
+                                                          kernel_initializer = tf.truncated_normal_initializer(stddev=0.01))
+        
+    return upsampled_vgg_3_to_output
+tests.test_layers(layers)
 
 def optimize(nn_last_layer, correct_label, learning_rate, num_classes):
     """
@@ -60,10 +143,22 @@ def optimize(nn_last_layer, correct_label, learning_rate, num_classes):
     :param num_classes: Number of classes to classify
     :return: Tuple of (logits, train_op, cross_entropy_loss)
     """
-    # TODO: Implement function
-    return None, None, None
+    with tf.variable_scope('logits'):
+        logits = tf.reshape(nn_last_layer, (-1, num_classes), name='logits')
+    
+    with tf.variable_scope('target_reshape'):
+        reshaped_label = tf.reshape(correct_label, (-1, num_classes))
+    
+#     with tf.variable_scope('cross_entropy'): # BREAKS HELPER FUNCTION FOR IMAGE INFERENCE SAMPLES
+    xentropy = tf.nn.softmax_cross_entropy_with_logits(labels=reshaped_label, logits=logits)#, name='softmax_xentropy_with_logits')
+    mean_xentropy_loss = tf.reduce_mean(xentropy, name='mean_xentropy_loss')
+    tf.summary.scalar('mean_xentropy_loss', mean_xentropy_loss)
+    
+    with tf.variable_scope('optimize'):
+        optimizer = tf.train.AdamOptimizer(0.001)
+        train_op = optimizer.minimize(mean_xentropy_loss)#, global_step=global_step)
+    return logits, train_op, mean_xentropy_loss 
 tests.test_optimize(optimize)
-
 
 def train_nn(sess, epochs, batch_size, get_batches_fn, train_op, cross_entropy_loss, input_image,
              correct_label, keep_prob, learning_rate):
@@ -78,11 +173,32 @@ def train_nn(sess, epochs, batch_size, get_batches_fn, train_op, cross_entropy_l
     :param input_image: TF Placeholder for input images
     :param correct_label: TF Placeholder for label images
     :param keep_prob: TF Placeholder for dropout keep probability
-    :param learning_rate: TF Placeholder for learning rate
-    """
-    # TODO: Implement function
-    pass
+    :param learning_rate: TF Placeholder for learning rate 
+    """    
+    card_X = 0
+    sum_loss = 0.
+
+    for epoch in range(epochs):
+        for X_batch, y_batch in get_batches_fn(batch_size):
+            card_X += len(X_batch)
+            feed_dict = {
+                input_image: np.float32(X_batch),
+                correct_label: y_batch,
+                keep_prob: 0.8
+            }
+            _, loss_val = sess.run([train_op, cross_entropy_loss], feed_dict=feed_dict)
+            sum_loss += loss_val
+        # this is technically right here but wrong later on. divide by batch count but last batch may not be fullsized
+        batches_count = np.ceil(card_X / batch_size)
+        mean_loss = sum_loss / batches_count
+        print('mean_loss: {}'.format(mean_loss))
 tests.test_train_nn(train_nn)
+
+# tests I believe are locking out printing in jupyter from TF
+# time.sleep(25)
+# sys.stdout = sys.__stdout__
+
+print('good')
 
 
 def run():
@@ -91,32 +207,63 @@ def run():
     data_dir = './data'
     runs_dir = './runs'
     tests.test_for_kitti_dataset(data_dir)
-
-    # Download pretrained vgg model
+    epochs = 15
+    batch_size = 20
+    # download pretrained vgg model
     helper.maybe_download_pretrained_vgg(data_dir)
 
-    # OPTIONAL: Train and Inference on the cityscapes dataset instead of the Kitti dataset.
-    # You'll need a GPU with at least 10 teraFLOPS to train on.
-    #  https://www.cityscapes-dataset.com/
-
+    tf.reset_default_graph()
     with tf.Session() as sess:
-        # Path to vgg model
+    # create necessary constants
+        learning_rate = tf.placeholder(tf.float32)
+        
+    # Create model with given path for pretrained vgg model
         vgg_path = os.path.join(data_dir, 'vgg')
-        # Create function to get batches
+        vgg_tag = 'vgg16' 
+        vgg_input_tensor, vgg_keep_prob_tensor, vgg_layer3_out_tensor,             vgg_layer4_out_tensor, vgg_layer7_out_tensor = load_vgg(sess, vgg_path)
+        
+    # TODO: Build NN using load_vgg, layers, and optimize function
+        fcn_output = layers(vgg_layer3_out_tensor, vgg_layer4_out_tensor, vgg_layer7_out_tensor, num_classes)
+
+        correct_label = tf.placeholder(tf.float32, [None, image_shape[0], image_shape[1], num_classes])
+        logits, train_op, mean_xentropy_loss = optimize(fcn_output, correct_label, learning_rate, num_classes)
+        
+    # run variable initializer
+        sess.run(tf.global_variables_initializer())
+
+                
+    # Get train set helper and run training of NN
         get_batches_fn = helper.gen_batch_function(os.path.join(data_dir, 'data_road/training'), image_shape)
+        train_nn(sess, epochs, batch_size, get_batches_fn, train_op, mean_xentropy_loss, vgg_input_tensor,
+             correct_label, vgg_keep_prob_tensor, learning_rate)
+            
+#     # Get test set helper and run test of IOU and/or accuracy against final test set
+#         get_test_batches_fn = helper.gen_batch_function(os.path.join(data_dir, 'data_road/training'), image_shape)
 
-        # OPTIONAL: Augment Images for better results
-        #  https://datascience.stackexchange.com/questions/5224/how-to-prepare-augment-images-for-neural-network
+    # create and write sample inference overlay images
+        print("thiswhereiam")
+        overlays = helper.gen_test_output(sess, logits, vgg_keep_prob_tensor, vgg_input_tensor,
+                                          os.path.join(data_dir, 'data_road/testing'), image_shape)
+        overlays = list(overlays)
+        print(len(overlays))
+        sample_folder = 'sample_inference_images/'
+        directory = os.path.join(data_dir, sample_folder)
+        if not os.path.exists(directory):
+            os.makedirs(directory)
 
-        # TODO: Build NN using load_vgg, layers, and optimize function
+        for file, image in overlays:
+            img.imsave(os.path.join(directory, file), image)
 
-        # TODO: Train NN using the train_nn function
+#     # save the model
+        model_folder = 'models/'
+        directory = os.path.join(data_dir, model_folder)
+        if not os.path.exists(directory):
+            os.makedirs(directory)
 
-        # TODO: Save inference data using helper.save_inference_samples
-        #  helper.save_inference_samples(runs_dir, data_dir, sess, image_shape, logits, keep_prob, input_image)
+        saver = tf.train.Saver()    
+        saver.save(sess, os.path.join(directory, 'working_beta_1.0'))
 
-        # OPTIONAL: Apply the trained model to a video
-
-
+        
 if __name__ == '__main__':
     run()
+
