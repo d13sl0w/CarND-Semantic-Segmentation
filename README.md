@@ -2,6 +2,14 @@
 ### Introduction
 In this project, you'll label the pixels of a road in images using a Fully Convolutional Network (FCN).
 
+### To-Do When Finished with Final Semester Project
+- Finish namespacing and TensorBoard details
+- Apply to video (including deconstructing to and reconstruting from frames)
+- Apply optimizations to the graph itself
+- Include IOU calculation for final test as well as every 5 epochs on training
+- Use full data set with multiple classes
+- Import image augmentation from earlier projects
+
 ### Setup
 ##### Frameworks and Packages
 Make sure you have the following is installed:
